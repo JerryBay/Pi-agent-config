@@ -1,0 +1,8 @@
+{
+  "name": "pi-windows-notify-local",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test index.test.ts"
+  }
+}

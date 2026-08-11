@@ -1,0 +1,22 @@
+{
+  "name": "pi-agent-config",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Portable Windows configuration and workflow installer for Pi Agent.",
+  "keywords": [
+    "pi-package"
+  ],
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions/windows-notify/index.ts"
+    ],
+    "skills": [
+      "./skills/configure-playwright-mcp-windows"
+    ]
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test extensions/windows-notify/index.test.ts tests/profile-manager.test.mjs",
+    "validate": "node scripts/profile-manager.mjs validate"
+  }
+}

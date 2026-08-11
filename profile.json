@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "id": "pi-agent-config",
+  "packageVersion": "0.1.0",
+  "packages": [
+    {
+      "id": "pi-agent-config",
+      "source": "git:git@github.com:JerryBay/Pi-agent-config.git",
+      "gitUrl": "git@github.com:JerryBay/Pi-agent-config.git",
+      "private": true
+    },
+    {
+      "id": "codex-workflow-profile",
+      "source": "git:git@github.com:JerryBay/codex-workflow-profile.git",
+      "gitUrl": "git@github.com:JerryBay/codex-workflow-profile.git",
+      "private": true,
+      "legacyLocalPackageName": "codex-workflow-profile"
+    },
+    {
+      "id": "pi-mcp-adapter",
+      "source": "npm:pi-mcp-adapter"
+    },
+    {
+      "id": "pi-web-access",
+      "source": "npm:pi-web-access"
+    },
+    {
+      "id": "pi-subagents",
+      "source": "npm:@tintinweb/pi-subagents"
+    },
+    {
+      "id": "pi-btw",
+      "source": "npm:pi-btw"
+    },
+    {
+      "id": "pi-hermes-memory",
+      "source": "npm:pi-hermes-memory"
+    },
+    {
+      "id": "tmustier-pi-extensions",
+      "source": "git:github.com/tmustier/pi-extensions",
+      "gitUrl": "https://github.com/tmustier/pi-extensions",
+      "filter": {
+        "extensions": [
+          "files-widget/index.ts",
+          "usage-extension/index.ts",
+          "raw-paste/index.ts"
+        ]
+      }
+    }
+  ],
+  "legacyResources": [
+    {
+      "id": "windows-notify-local",
+      "packageId": "pi-agent-config",
+      "resourceType": "extensions",
+      "sourceRelativePath": "extensions/windows-notify",
+      "targetRelativePath": "extensions/windows-notify"
+    },
+    {
+      "id": "playwright-skill-memory",
+      "packageId": "pi-agent-config",
+      "resourceType": "skills",
+      "sourceRelativePath": "skills/configure-playwright-mcp-windows",
+      "targetRelativePath": "pi-hermes-memory/skills/configure-playwright-mcp-windows"
+    }
+  ],
+  "agentContext": {
+    "packageId": "codex-workflow-profile",
+    "relativePath": "AGENTS.md"
+  },
+  "settingsDefaults": {
+    "theme": "dark/dark"
+  },
+  "mcp": {
+    "settingsDefaults": {
+      "mcpFooterStatus": "compact",
+      "outputGuard": true
+    },
+    "playwright": {
+      "serverName": "playwright",
+      "package": "@playwright/mcp@0.0.79",
+      "lifecycle": "lazy",
+      "requestTimeoutMs": 120000,
+      "outputMaxSize": 52428800,
+      "viewportSize": "1440x900",
+      "imageResponses": "omit"
+    }
+  }
+}
