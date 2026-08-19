@@ -1,0 +1,32 @@
+{
+  "quick": {
+    "provider": "OpenAI",
+    "model": "gpt-5.6-sol",
+    "thinkingLevel": "low",
+    "instructions": "Use a fast path for small, clear tasks. Keep exploration narrow, make only necessary changes, and run the cheapest check that proves the result. Escalate only when local evidence shows broader risk."
+  },
+  "deep": {
+    "provider": "OpenAI",
+    "model": "gpt-5.6-sol",
+    "thinkingLevel": "max",
+    "instructions": "Use deep analysis for complex implementation and debugging. Trace the real execution path, examine architectural boundaries and edge cases, and verify the result through the narrowest complete runtime path."
+  },
+  "review": {
+    "provider": "OpenAI",
+    "model": "gpt-5.6-sol",
+    "thinkingLevel": "high",
+    "instructions": "Operate in code-review mode. Lead with concrete bugs, regressions, security or reliability risks, and missing tests, ordered by severity with exact file references. Do not modify files unless explicitly asked."
+  },
+  "research": {
+    "provider": "OpenAI",
+    "model": "gpt-5.6-sol",
+    "thinkingLevel": "high",
+    "instructions": "Operate in research mode. Investigate the question from multiple independent angles, prefer primary sources, verify material claims, cite source links, and clearly separate observed facts, inferences, assumptions, and unknowns. Do not modify local files unless explicitly asked."
+  },
+  "minimal": {
+    "provider": "OpenAI",
+    "model": "gpt-5.6-sol",
+    "thinkingLevel": "minimal",
+    "instructions": "Handle the request with minimal latency and scope. Avoid broad exploration, optional additions, and speculative changes. State uncertainty briefly when the available evidence is insufficient."
+  }
+}

@@ -28,6 +28,13 @@ if (-not $Pi) { throw "Pi was not found on PATH." }
 $State = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
 $Profile = Get-Content -LiteralPath $ProfilePath -Raw | ConvertFrom-Json
 
+function Get-ManagedDirectoryHash {
+    param([string]$Path)
+    $result = & $Node $ManagerPath "hash-directory" "--root" $Root "--path" $Path | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or -not $result.hash) { throw "Could not hash package directory: $Path" }
+    return [string]$result.hash
+}
+
 if (-not $PSCmdlet.ShouldProcess($AgentDir, "Remove files and package settings owned by pi-agent-config")) {
     exit 0
 }
@@ -41,6 +48,18 @@ try {
     foreach ($property in @($State.packages.PSObject.Properties)) {
         $record = $property.Value
         if ($record.created -ne $true) { continue }
+        $packageDefinition = @($Profile.packages | Where-Object { $_.id -eq $property.Name } | Select-Object -First 1)
+        if ($packageDefinition.Count -eq 1 -and $packageDefinition[0].PSObject.Properties.Name -contains "archive") {
+            $archivePath = Join-Path $AgentDir ([string]$packageDefinition[0].archive.targetRelativePath)
+            $markerPath = Join-Path $archivePath ".pi-agent-config-archive.json"
+            if (Test-Path -LiteralPath $markerPath) {
+                $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
+                if ((Get-ManagedDirectoryHash -Path $archivePath) -ne [string]$marker.hash) {
+                    Write-Warning "Modified archive package directory was preserved: $archivePath"
+                    continue
+                }
+            }
+        }
         Write-Host "Removing $($record.source)..." -ForegroundColor Cyan
         & $Pi remove ([string]$record.source) --no-approve
         if ($LASTEXITCODE -ne 0) {

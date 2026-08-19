@@ -9,6 +9,7 @@ const FOCUS_IN = "\x1b[I";
 const FOCUS_OUT = "\x1b[O";
 const TOAST_TIMEOUT_MS = 8_000;
 const POWERSHELL_FOREGROUND_EXIT = 20;
+export const WINDOWS_TOAST_XML = '<toast activationType="background" duration="short"><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual></toast>';
 
 const POWERSHELL_TOAST_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -68,7 +69,7 @@ if ([string]::IsNullOrWhiteSpace($appId)) {
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
 
 $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml('<toast duration="short"><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual></toast>')
+$xml.LoadXml('${WINDOWS_TOAST_XML}')
 $textNodes = $xml.GetElementsByTagName('text')
 [void]$textNodes.Item(0).AppendChild($xml.CreateTextNode($env:PI_NOTIFY_TITLE))
 [void]$textNodes.Item(1).AppendChild($xml.CreateTextNode($env:PI_NOTIFY_BODY))

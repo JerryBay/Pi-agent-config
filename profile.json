@@ -37,14 +37,45 @@
       "source": "npm:pi-hermes-memory"
     },
     {
+      "id": "pi-raw-paste",
+      "source": "npm:@tmustier/pi-raw-paste@0.1.3",
+      "legacySources": [
+        "npm:@tmustier/pi-raw-paste"
+      ]
+    },
+    {
       "id": "tmustier-pi-extensions",
-      "source": "git:github.com/tmustier/pi-extensions",
-      "gitUrl": "https://github.com/tmustier/pi-extensions",
+      "source": "git:git@github.com:tmustier/pi-extensions.git",
+      "gitUrl": "git@github.com:tmustier/pi-extensions.git",
+      "legacySources": [
+        "git:github.com/tmustier/pi-extensions"
+      ],
+      "archive": {
+        "targetRelativePath": "git/github.com/tmustier/pi-extensions",
+        "include": [
+          "package.json",
+          "files-widget/",
+          "usage-extension/",
+          "extending-pi/",
+          "pi-ralph-wiggum/"
+        ],
+        "exclude": [
+          "files-widget/demo.mp4",
+          "files-widget/demo.svg",
+          "usage-extension/graphs-screenshot.png",
+          "usage-extension/insights-screenshot.png",
+          "usage-extension/screenshot.png"
+        ],
+        "skills": [
+          "./extending-pi/SKILL.md",
+          "./extending-pi/skill-creator/SKILL.md",
+          "./pi-ralph-wiggum/SKILL.md"
+        ]
+      },
       "filter": {
         "extensions": [
           "files-widget/index.ts",
-          "usage-extension/index.ts",
-          "raw-paste/index.ts"
+          "usage-extension/index.ts"
         ]
       }
     }
@@ -55,7 +86,16 @@
       "packageId": "pi-agent-config",
       "resourceType": "extensions",
       "sourceRelativePath": "extensions/windows-notify",
-      "targetRelativePath": "extensions/windows-notify"
+      "targetRelativePath": "extensions/windows-notify",
+      "packageRelativePath": "./extensions/windows-notify/index.ts"
+    },
+    {
+      "id": "preset-local",
+      "packageId": "pi-agent-config",
+      "resourceType": "extensions",
+      "sourceRelativePath": "extensions/preset",
+      "targetRelativePath": "extensions/preset",
+      "packageRelativePath": "./extensions/preset/index.ts"
     },
     {
       "id": "playwright-skill-memory",

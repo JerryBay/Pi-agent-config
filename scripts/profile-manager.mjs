@@ -55,6 +55,7 @@ function hashDirectory(path) {
   const hash = createHash("sha256");
   const visit = (directory, relative = "") => {
     for (const name of readdirSync(directory).sort()) {
+      if (name === ".pi-agent-config-archive.json") continue;
       const absolute = join(directory, name);
       const childRelative = relative ? `${relative}/${name}` : name;
       const stat = statSync(absolute);
@@ -103,6 +104,14 @@ function sourceEquals(left, right) {
   return typeof left === "string" && typeof right === "string" && left.toLowerCase() === right.toLowerCase();
 }
 
+function withPackageSource(entry, source) {
+  return typeof entry === "string" ? source : { ...structuredClone(entry), source };
+}
+
+function migrationEntry(record) {
+  return record?.entry ?? record;
+}
+
 function findPackageIndex(packages, source) {
   return packages.findIndex((entry) => sourceEquals(packageSource(entry), source));
 }
@@ -113,10 +122,15 @@ function findPackage(profile, id) {
   return item;
 }
 
-function checkoutPath(agentDir, item) {
+function gitCoordinates(item) {
   const match = item.gitUrl?.match(/^(?:https:\/\/|ssh:\/\/git@|git@)([^/:]+)[:/]([^/]+)\/([^/]+?)(?:\.git)?$/i);
-  if (!match) throw new Error(`Cannot derive checkout path from ${item.gitUrl}`);
-  return join(agentDir, "git", match[1], match[2], match[3]);
+  if (!match) throw new Error(`Cannot derive Git coordinates from ${item.gitUrl}`);
+  return { host: match[1], owner: match[2], repository: match[3] };
+}
+
+function checkoutPath(agentDir, item) {
+  const { host, owner, repository } = gitCoordinates(item);
+  return join(agentDir, "git", host, owner, repository);
 }
 
 function localPackageName(source) {
@@ -155,6 +169,9 @@ function validateProfile(root, profile) {
     if (!item.id || !item.source) errors.push("Every package requires id and source");
     if (ids.has(item.id)) errors.push(`Duplicate package id: ${item.id}`);
     if (sources.has(item.source?.toLowerCase())) errors.push(`Duplicate package source: ${item.source}`);
+    if (item.archive && (!Array.isArray(item.archive.include) || item.archive.include.length === 0 || !item.archive.targetRelativePath)) {
+      errors.push(`Snapshot package requires include paths and targetRelativePath: ${item.id}`);
+    }
     ids.add(item.id);
     sources.add(item.source?.toLowerCase());
   }
@@ -190,6 +207,30 @@ function validateProfile(root, profile) {
   return { packages: profile.packages.length, profileId: profile.id };
 }
 
+function migratePackageAliases(settings, state, profile) {
+  let count = 0;
+  settings.packages ??= [];
+  for (const item of profile.packages) {
+    for (const legacySource of item.legacySources ?? []) {
+      const index = findPackageIndex(settings.packages, legacySource);
+      if (index < 0 || findPackageIndex(settings.packages, item.source) >= 0) continue;
+      const original = structuredClone(settings.packages[index]);
+      const replacement = withPackageSource(original, item.source);
+      if (!state.migratedSources.some((record) => sourceEquals(packageSource(migrationEntry(record)), legacySource))) {
+        state.migratedSources.push({
+          entry: original,
+          replacementSource: item.source,
+          appliedEntryHash: hashValue(replacement),
+          requireLocalPath: false,
+        });
+      }
+      settings.packages[index] = replacement;
+      count += 1;
+    }
+  }
+  return count;
+}
+
 function prepareProfile(root, agentDir, profile) {
   const stateDir = join(agentDir, "profile-state");
   const statePath = join(stateDir, `${profile.id}.json`);
@@ -211,12 +252,26 @@ function prepareProfile(root, agentDir, profile) {
   if (!state.installInProgress || !Array.isArray(state.preInstallPackages)) {
     state.preInstallPackages = (settings.packages ?? []).map(packageSource).filter(Boolean);
   }
+  const migratedAliases = migratePackageAliases(settings, state, profile);
+  if (migratedAliases > 0) writeJsonAtomic(settingsPath, settings);
   state.installInProgress = true;
   state.preparedAt = new Date().toISOString();
   state.lastBackup = backedUp ? backupDir : null;
   state.profileVersion = profile.packageVersion;
   writeJsonAtomic(statePath, state);
-  return { backupDir: state.lastBackup, statePath };
+  return { backupDir: state.lastBackup, statePath, migratedAliases };
+}
+
+function disablePackagedResource(agentDir, item, resource, disabled) {
+  const resourceType = resource.resourceType;
+  const manifest = readJson(join(checkoutPath(agentDir, item), "package.json"), {});
+  const configured = manifest.pi?.[resourceType];
+  const current = disabled[item.id]?.[resourceType] ?? configured;
+  const excludedPath = resource.packageRelativePath?.replaceAll("\\", "/").toLowerCase();
+  disabled[item.id] ??= {};
+  disabled[item.id][resourceType] = Array.isArray(current) && excludedPath
+    ? current.filter((path) => path.replaceAll("\\", "/").toLowerCase() !== excludedPath)
+    : [];
 }
 
 function migrateLegacyResources(agentDir, profile, state, summary) {
@@ -229,8 +284,7 @@ function migrateLegacyResources(agentDir, profile, state, summary) {
     const sourcePath = join(checkoutPath(agentDir, item), resource.sourceRelativePath);
     if (!existsSync(sourcePath)) {
       summary.conflicts.push(`Legacy resource source is missing: ${resource.id}`);
-      disabled[resource.packageId] ??= {};
-      disabled[resource.packageId][resource.resourceType] = [];
+      disablePackagedResource(agentDir, item, resource, disabled);
       continue;
     }
 
@@ -238,16 +292,14 @@ function migrateLegacyResources(agentDir, profile, state, summary) {
     const targetHash = hashDirectory(targetPath);
     if (sourceHash !== targetHash) {
       summary.conflicts.push(`Legacy resource differs and was preserved: ${resource.targetRelativePath}`);
-      disabled[resource.packageId] ??= {};
-      disabled[resource.packageId][resource.resourceType] = [];
+      disablePackagedResource(agentDir, item, resource, disabled);
       continue;
     }
 
     const backupPath = join(agentDir, "profile-state", "migrated-resources", resource.id);
     if (existsSync(backupPath)) {
       summary.conflicts.push(`Legacy resource backup already exists: ${resource.id}`);
-      disabled[resource.packageId] ??= {};
-      disabled[resource.packageId][resource.resourceType] = [];
+      disablePackagedResource(agentDir, item, resource, disabled);
       continue;
     }
     mkdirSync(dirname(backupPath), { recursive: true });
@@ -262,19 +314,26 @@ function migrateLegacyResources(agentDir, profile, state, summary) {
   return disabled;
 }
 
-function applyPackagePolicy(settings, state, profile, summary, dynamicFilters = {}) {
+function applyPackagePolicy(agentDir, settings, state, profile, summary, dynamicFilters = {}, options = {}) {
   settings.packages ??= [];
-  const preexisting = new Set((state.preInstallPackages ?? []).map((source) => source.toLowerCase()));
+  const preexisting = state.preInstallPackages ?? [];
 
   for (const item of profile.packages) {
-    const index = findPackageIndex(settings.packages, item.source);
+    let index = findPackageIndex(settings.packages, item.source);
+    if (index < 0 && item.archive && existsSync(checkoutPath(agentDir, item))) {
+      settings.packages.push(item.source);
+      index = settings.packages.length - 1;
+      summary.added.push(`Package setting: ${item.id}`);
+    }
     if (index < 0) {
       summary.conflicts.push(`Package was not installed: ${item.source}`);
       continue;
     }
+    const migratedExternalSource = state.migratedSources.some((migration) =>
+      migration?.requireLocalPath === false && sourceEquals(migration.replacementSource, item.source));
     state.packages[item.id] ??= {
       source: item.source,
-      created: !preexisting.has(item.source.toLowerCase()),
+      created: !preexisting.some((source) => sourceEquals(source, item.source)) && !migratedExternalSource,
     };
     state.packages[item.id].source = item.source;
 
@@ -285,13 +344,28 @@ function applyPackagePolicy(settings, state, profile, summary, dynamicFilters = 
     if (Object.keys(desiredFilter).length === 0) continue;
     const current = settings.packages[index];
     const record = state.packages[item.id];
-    if (record.created || dynamicFilters[item.id]) {
-      if (!record.created && dynamicFilters[item.id] && !record.originalEntry) {
-        record.originalEntry = structuredClone(current);
+    const desiredEntry = { source: item.source, ...desiredFilter };
+    const currentHash = hashValue(current);
+    const desiredHash = hashValue(desiredEntry);
+    const dynamicFilter = dynamicFilters[item.id];
+
+    if (record.created) {
+      if (record.appliedEntryHash && currentHash !== record.appliedEntryHash && !options.forceManagedUpdate) {
+        summary.conflicts.push(`Managed package filter was modified locally: ${item.id}`);
+        continue;
       }
-      settings.packages[index] = { source: item.source, ...desiredFilter };
-      if (record.originalEntry) record.appliedEntryHash = hashValue(settings.packages[index]);
-      summary.updated.push(`Package filter: ${item.id}`);
+      settings.packages[index] = desiredEntry;
+      record.appliedEntryHash = desiredHash;
+      summary[currentHash === desiredHash ? "already" : "updated"].push(`Package filter: ${item.id}`);
+    } else if (dynamicFilter) {
+      if (record.appliedEntryHash && currentHash !== record.appliedEntryHash && !options.forceManagedUpdate) {
+        summary.conflicts.push(`Managed package filter was modified locally: ${item.id}`);
+        continue;
+      }
+      record.originalEntry ??= structuredClone(current);
+      settings.packages[index] = desiredEntry;
+      record.appliedEntryHash = desiredHash;
+      summary[currentHash === desiredHash ? "already" : "updated"].push(`Package filter: ${item.id}`);
     } else if (typeof current === "object" && Object.entries(desiredFilter).every(([key, value]) => stableJson(current[key]) === stableJson(value))) {
       summary.already.push(`Package filter: ${item.id}`);
     } else {
@@ -308,8 +382,12 @@ function applyPackagePolicy(settings, state, profile, summary, dynamicFilters = 
         retained.push(entry);
         continue;
       }
-      if (!state.migratedSources.some((candidate) => sourceEquals(packageSource(candidate), source))) {
-        state.migratedSources.push(structuredClone(entry));
+      if (!state.migratedSources.some((migration) => sourceEquals(packageSource(migrationEntry(migration)), source))) {
+        state.migratedSources.push({
+          entry: structuredClone(entry),
+          replacementSource: item.source,
+          requireLocalPath: true,
+        });
       }
       summary.updated.push(`Migrated local package source: ${source}`);
     }
@@ -317,19 +395,39 @@ function applyPackagePolicy(settings, state, profile, summary, dynamicFilters = 
   }
 }
 
-function applyDefaults(target, defaults, records, label, summary) {
+function applyDefaults(target, defaults, records, label, summary, options = {}) {
   for (const [key, value] of Object.entries(defaults ?? {})) {
-    if (Object.hasOwn(target, key)) {
+    const record = records[key];
+    if (!Object.hasOwn(target, key)) {
+      if (record && !options.repair) {
+        summary.conflicts.push(`${label}.${key} was removed locally`);
+        continue;
+      }
+      target[key] = structuredClone(value);
+      records[key] = { created: true, value: structuredClone(value) };
+      summary[record ? "updated" : "added"].push(`${label}.${key}`);
+      continue;
+    }
+    if (!record) {
       summary.preserved.push(`${label}.${key}`);
       continue;
     }
+    if (stableJson(target[key]) === stableJson(value)) {
+      record.value = structuredClone(value);
+      summary.already.push(`${label}.${key}`);
+      continue;
+    }
+    if (stableJson(target[key]) !== stableJson(record.value) && !options.forceManagedUpdate) {
+      summary.conflicts.push(`${label}.${key} was modified locally`);
+      continue;
+    }
     target[key] = structuredClone(value);
-    records[key] = { created: true, value: structuredClone(value) };
-    summary.added.push(`${label}.${key}`);
+    record.value = structuredClone(value);
+    summary.updated.push(`${label}.${key}`);
   }
 }
 
-function applyAgentContext(agentDir, profile, state, summary) {
+function applyAgentContext(agentDir, profile, state, options, summary) {
   const context = profile.agentContext;
   if (!context) return;
   const item = findPackage(profile, context.packageId);
@@ -343,9 +441,13 @@ function applyAgentContext(agentDir, profile, state, summary) {
   const sourceHash = hashFile(sourcePath);
   const record = state.files.AGENTS;
   if (!existsSync(targetPath)) {
+    if (record && !options.repair) {
+      summary.conflicts.push("AGENTS.md was removed locally");
+      return;
+    }
     copyFileSync(sourcePath, targetPath);
     state.files.AGENTS = { created: true, hash: sourceHash, source: `${item.id}/${context.relativePath}` };
-    summary.added.push("AGENTS.md");
+    summary[record ? "updated" : "added"].push("AGENTS.md");
     return;
   }
 
@@ -360,12 +462,19 @@ function applyAgentContext(agentDir, profile, state, summary) {
     return;
   }
 
-  if (currentHash !== record.hash) {
-    summary.conflicts.push("AGENTS.md was modified locally");
+  if (currentHash === sourceHash) {
+    record.hash = sourceHash;
+    summary.already.push("AGENTS.md");
     return;
   }
-  if (currentHash === sourceHash) {
-    summary.already.push("AGENTS.md");
+  if (currentHash !== record.hash) {
+    if (!options.forceManagedUpdate) {
+      summary.conflicts.push("AGENTS.md was modified locally");
+      return;
+    }
+    copyFileSync(sourcePath, targetPath);
+    record.hash = sourceHash;
+    summary.updated.push("AGENTS.md forced to the managed source");
     return;
   }
   copyFileSync(sourcePath, targetPath);
@@ -404,7 +513,7 @@ function applyMcp(agentDir, profile, state, options, summary) {
   const mcp = readJson(mcpPath, {});
   mcp.settings ??= {};
   mcp.mcpServers ??= {};
-  applyDefaults(mcp.settings, profile.mcp.settingsDefaults, state.mcpSettingsDefaults, "mcp.settings", summary);
+  applyDefaults(mcp.settings, profile.mcp.settingsDefaults, state.mcpSettingsDefaults, "mcp.settings", summary, options);
 
   if (!options.npx || !options.browser || !options.outputDir) {
     summary.preserved.push("Playwright MCP skipped because npx or a supported browser was not detected");
@@ -419,9 +528,13 @@ function applyMcp(agentDir, profile, state, options, summary) {
   const record = state.mcpServers[name];
 
   if (!current) {
-    mcp.mcpServers[name] = next;
-    state.mcpServers[name] = { created: true, hash: nextHash };
-    summary.added.push(`MCP server: ${name}`);
+    if (record && !options.repair) {
+      summary.conflicts.push(`MCP server was removed locally: ${name}`);
+    } else {
+      mcp.mcpServers[name] = next;
+      state.mcpServers[name] = { created: true, hash: nextHash };
+      summary[record ? "updated" : "added"].push(`MCP server: ${name}`);
+    }
   } else if (!record) {
     if (hashValue(current) === nextHash) {
       state.mcpServers[name] = { created: false, hash: nextHash };
@@ -429,16 +542,144 @@ function applyMcp(agentDir, profile, state, options, summary) {
     } else {
       summary.conflicts.push(`Existing MCP server preserved: ${name}`);
     }
-  } else if (hashValue(current) !== record.hash) {
-    summary.conflicts.push(`MCP server was modified locally: ${name}`);
   } else if (hashValue(current) === nextHash) {
+    record.hash = nextHash;
     summary.already.push(`MCP server: ${name}`);
+  } else if (hashValue(current) !== record.hash) {
+    if (!options.forceManagedUpdate) {
+      summary.conflicts.push(`MCP server was modified locally: ${name}`);
+    } else {
+      mcp.mcpServers[name] = next;
+      record.hash = nextHash;
+      summary.updated.push(`MCP server forced to managed configuration: ${name}`);
+    }
   } else {
     mcp.mcpServers[name] = next;
     record.hash = nextHash;
     summary.updated.push(`MCP server: ${name}`);
   }
   writeJsonAtomic(mcpPath, mcp);
+}
+
+async function fetchWithRetry(url, attempts = 4) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        headers: { "User-Agent": "pi-agent-config" },
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await new Promise((resolvePromise) => setTimeout(resolvePromise, attempt * 500));
+    }
+  }
+  throw new Error(`Download failed after ${attempts} attempts: ${url}: ${lastError?.message ?? lastError}`);
+}
+
+async function runWithConcurrency(items, limit, action) {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      await action(items[index]);
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function installArchivePackage(agentDir, profile, packageId, gitCommand = "git") {
+  const item = findPackage(profile, packageId);
+  if (!item.archive) throw new Error(`Package is not configured for snapshot installation: ${packageId}`);
+  const targetPath = checkoutPath(agentDir, item);
+  const markerPath = join(targetPath, ".pi-agent-config-archive.json");
+  const remoteOutput = execFileSync(gitCommand, ["ls-remote", "--exit-code", item.gitUrl, "HEAD"], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 20_000,
+  }).trim();
+  const remoteCommit = remoteOutput.split(/\s+/)[0];
+  let currentCommit;
+
+  if (existsSync(markerPath)) {
+    const marker = readJson(markerPath, {});
+    if (hashDirectory(targetPath) !== marker.hash) return { status: "preserved", commit: marker.commit, path: targetPath };
+    currentCommit = marker.commit;
+  } else if (existsSync(join(targetPath, ".git"))) {
+    const dirty = execFileSync(gitCommand, ["-C", targetPath, "status", "--porcelain"], {
+      encoding: "utf8", windowsHide: true, timeout: 20_000,
+    }).trim();
+    if (dirty) return { status: "preserved", path: targetPath };
+    currentCommit = execFileSync(gitCommand, ["-C", targetPath, "rev-parse", "HEAD"], {
+      encoding: "utf8", windowsHide: true, timeout: 20_000,
+    }).trim();
+  } else if (existsSync(targetPath)) {
+    return { status: "preserved", path: targetPath };
+  }
+
+  if (currentCommit === remoteCommit) return { status: "already", commit: remoteCommit, path: targetPath };
+
+  const { owner, repository } = gitCoordinates(item);
+  const treeResponse = await fetchWithRetry(`https://api.github.com/repos/${owner}/${repository}/git/trees/${remoteCommit}?recursive=1`);
+  const tree = await treeResponse.json();
+  if (tree.truncated || !Array.isArray(tree.tree)) throw new Error(`GitHub returned an incomplete tree for ${packageId}`);
+  const includes = item.archive.include ?? [];
+  const excludes = new Set(item.archive.exclude ?? []);
+  const files = tree.tree.filter((entry) => entry.type === "blob" && !excludes.has(entry.path) && includes.some((prefix) => prefix.endsWith("/") ? entry.path.startsWith(prefix) : entry.path === prefix));
+  if (files.length === 0) throw new Error(`No files selected for snapshot package: ${packageId}`);
+
+  const workRoot = join(agentDir, "profile-state", "downloads", randomUUID());
+  const stagingPath = join(workRoot, "package");
+  const backupPath = `${targetPath}.pi-agent-config-backup-${randomUUID()}`;
+  mkdirSync(stagingPath, { recursive: true });
+  try {
+    await runWithConcurrency(files, 4, async (entry) => {
+      const encodedPath = entry.path.split("/").map(encodeURIComponent).join("/");
+      let content;
+      try {
+        const response = await fetchWithRetry(`https://raw.githubusercontent.com/${owner}/${repository}/${remoteCommit}/${encodedPath}`);
+        content = Buffer.from(await response.arrayBuffer());
+      } catch {
+        const blobResponse = await fetchWithRetry(`https://api.github.com/repos/${owner}/${repository}/git/blobs/${entry.sha}`);
+        const blob = await blobResponse.json();
+        if (blob.encoding !== "base64" || typeof blob.content !== "string") throw new Error(`Unsupported GitHub blob response for ${entry.path}`);
+        content = Buffer.from(blob.content.replace(/\s/g, ""), "base64");
+      }
+      const destination = join(stagingPath, ...entry.path.split("/"));
+      mkdirSync(dirname(destination), { recursive: true });
+      writeFileSync(destination, content);
+    });
+
+    const packageManifestPath = join(stagingPath, "package.json");
+    const packageManifest = readJson(packageManifestPath, {});
+    packageManifest.pi = {
+      extensions: (item.filter?.extensions ?? []).map((path) => `./${path}`),
+      skills: structuredClone(item.archive.skills ?? []),
+    };
+    writeJsonAtomic(packageManifestPath, packageManifest);
+
+    mkdirSync(dirname(targetPath), { recursive: true });
+    if (existsSync(targetPath)) renameSync(targetPath, backupPath);
+    try {
+      renameSync(stagingPath, targetPath);
+      writeJsonAtomic(markerPath, {
+        source: item.source,
+        commit: remoteCommit,
+        hash: hashDirectory(targetPath),
+      });
+      rmSync(backupPath, { recursive: true, force: true });
+    } catch (error) {
+      rmSync(targetPath, { recursive: true, force: true });
+      if (existsSync(backupPath)) renameSync(backupPath, targetPath);
+      throw error;
+    }
+  } finally {
+    rmSync(workRoot, { recursive: true, force: true });
+  }
+  return { status: currentCommit ? "updated" : "installed", commit: remoteCommit, files: files.length, path: targetPath };
 }
 
 function resolvePackageVersions(agentDir, profile, state) {
@@ -451,6 +692,11 @@ function resolvePackageVersions(agentDir, profile, state) {
       if (existsSync(path)) record.resolvedVersion = readJson(path, {}).version;
     } else if (item.gitUrl) {
       const path = checkoutPath(agentDir, item);
+      const archiveMarker = join(path, ".pi-agent-config-archive.json");
+      if (existsSync(archiveMarker)) {
+        record.resolvedCommit = readJson(archiveMarker, {}).commit;
+        continue;
+      }
       if (!existsSync(join(path, ".git"))) continue;
       try {
         record.resolvedCommit = execFileSync("git", ["-C", path, "rev-parse", "HEAD"], {
@@ -474,10 +720,10 @@ function applyProfile(root, agentDir, profile, options) {
   const summary = { added: [], already: [], updated: [], preserved: [], conflicts: [] };
 
   const dynamicFilters = migrateLegacyResources(agentDir, profile, state, summary);
-  applyPackagePolicy(settings, state, profile, summary, dynamicFilters);
-  applyDefaults(settings, profile.settingsDefaults, state.settingsDefaults, "settings", summary);
+  applyPackagePolicy(agentDir, settings, state, profile, summary, dynamicFilters, options);
+  applyDefaults(settings, profile.settingsDefaults, state.settingsDefaults, "settings", summary, options);
   writeJsonAtomic(settingsPath, settings);
-  applyAgentContext(agentDir, profile, state, summary);
+  applyAgentContext(agentDir, profile, state, options, summary);
   applyMcp(agentDir, profile, state, options, summary);
   resolvePackageVersions(agentDir, profile, state);
 
@@ -513,6 +759,8 @@ function planProfile(agentDir, profile, options) {
     })),
     agentContext: profile.agentContext,
     playwright: options.npx && options.browser ? { command: options.npx, browser: options.browser } : "skipped",
+    repair: Boolean(options.repair),
+    forceManagedUpdate: Boolean(options.forceManagedUpdate),
   };
 }
 
@@ -540,9 +788,23 @@ function uninstallProfile(agentDir, profile) {
       summary.preserved.push(`Modified package filter: ${id}`);
     }
   }
-  for (const entry of state.migratedSources ?? []) {
+  for (const migration of state.migratedSources ?? []) {
+    const entry = migrationEntry(migration);
     const source = packageSource(entry);
-    if (source && findPackageIndex(settings.packages, source) < 0 && existsSync(source)) {
+    if (!source) continue;
+    const requiresLocalPath = migration?.entry ? migration.requireLocalPath === true : true;
+    if (requiresLocalPath && !existsSync(source)) continue;
+
+    const replacementSource = migration?.entry ? migration.replacementSource : undefined;
+    const replacementIndex = replacementSource ? findPackageIndex(settings.packages, replacementSource) : -1;
+    if (replacementIndex >= 0) {
+      if (migration.appliedEntryHash && hashValue(settings.packages[replacementIndex]) !== migration.appliedEntryHash) {
+        summary.preserved.push(`Modified migrated package source: ${replacementSource}`);
+        continue;
+      }
+      settings.packages[replacementIndex] = entry;
+      summary.restored.push(`Package source: ${source}`);
+    } else if (findPackageIndex(settings.packages, source) < 0) {
       settings.packages.push(entry);
       summary.restored.push(`Package source: ${source}`);
     }
@@ -623,9 +885,22 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       npx: args.npx || "",
       browser: args.browser || "",
       outputDir: args.outputDir || join(process.env.LOCALAPPDATA || agentDir, "Temp", "pi-playwright-mcp"),
+      repair: Boolean(args.repair || args.forceManagedUpdate),
+      forceManagedUpdate: Boolean(args.forceManagedUpdate),
     };
     let result;
     switch (args.command) {
+      case "install-archive": {
+        if (!args.packageId) throw new Error("install-archive requires --package-id");
+        result = await installArchivePackage(agentDir, profile, args.packageId, args.git || "git");
+        break;
+      }
+      case "hash-directory": {
+        if (!args.path) throw new Error("hash-directory requires --path");
+        if (!existsSync(resolve(args.path))) throw new Error(`Directory does not exist: ${args.path}`);
+        result = { hash: hashDirectory(resolve(args.path)) };
+        break;
+      }
       case "validate": result = validateProfile(root, profile); break;
       case "prepare": result = prepareProfile(root, agentDir, profile); break;
       case "plan": result = planProfile(agentDir, profile, options); break;

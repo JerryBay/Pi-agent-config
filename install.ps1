@@ -2,7 +2,9 @@
 param(
     [string]$AgentDir,
     [switch]$ValidateOnly,
-    [switch]$SkipPrivateAccessCheck
+    [switch]$SkipPrivateAccessCheck,
+    [switch]$Repair,
+    [switch]$ForceManagedUpdate
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,7 +44,24 @@ function Invoke-Checked {
     }
 }
 
+function Install-ArchivePackage {
+    param($Package)
+    $result = & $Node $ManagerPath "install-archive" "--root" $Root "--agent-dir" $AgentDir "--package-id" ([string]$Package.id) "--git" $Git | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw "Could not install snapshot package $($Package.id)." }
+    if ($result.status -eq "preserved") {
+        Write-Warning "Snapshot package $($Package.id) was modified or unrecognized and was preserved."
+    } else {
+        Write-Host "$($Package.id): $($result.status) $($result.commit) ($($result.files) files)"
+    }
+}
+
 $Node = Resolve-Executable -Names @("node.exe", "node") -Description "Node.js"
+$NodeVersionText = (& $Node -p "process.versions.node").Trim()
+if ($LASTEXITCODE -ne 0) { throw "Could not determine the Node.js version." }
+try { $NodeVersion = [version]$NodeVersionText } catch { throw "Node.js returned an invalid version: $NodeVersionText" }
+if ($NodeVersion.Major -lt 20) {
+    throw "Node.js 20 or newer is required; detected $NodeVersionText."
+}
 Invoke-Checked -Command $Node -Arguments @($ManagerPath, "validate", "--root", $Root)
 
 if ($ValidateOnly) {
@@ -77,6 +96,8 @@ $Profile = Get-Content -LiteralPath $ProfilePath -Raw | ConvertFrom-Json
 
 $ManagerOptions = @("--root", $Root, "--agent-dir", $AgentDir, "--npx", $Npx, "--output-dir", $OutputDir)
 if ($Browser) { $ManagerOptions += @("--browser", $Browser) }
+if ($Repair -or $ForceManagedUpdate) { $ManagerOptions += "--repair" }
+if ($ForceManagedUpdate) { $ManagerOptions += "--force-managed-update" }
 
 if ($WhatIfPreference) {
     Invoke-Checked -Command $Node -Arguments (@($ManagerPath, "plan") + $ManagerOptions)
@@ -89,7 +110,7 @@ if (-not $SkipPrivateAccessCheck) {
     try {
         $env:GIT_TERMINAL_PROMPT = "0"
         $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=8"
-        foreach ($package in @($Profile.packages | Where-Object { $_.private -eq $true })) {
+        foreach ($package in @($Profile.packages | Where-Object { $_.PSObject.Properties.Name -contains "private" -and $_.private -eq $true })) {
             Write-Host "Checking access to $($package.gitUrl)..."
             & $Git ls-remote --exit-code $package.gitUrl HEAD *> $null
             if ($LASTEXITCODE -ne 0) {
@@ -109,8 +130,11 @@ try {
     Invoke-Checked -Command $Node -Arguments @($ManagerPath, "prepare", "--root", $Root, "--agent-dir", $AgentDir)
 
     foreach ($package in @($Profile.packages)) {
-        if ($PSCmdlet.ShouldProcess($package.source, "Install or update Pi package")) {
-            Write-Host "Installing $($package.source)..." -ForegroundColor Cyan
+        if (-not $PSCmdlet.ShouldProcess($package.source, "Install or update Pi package")) { continue }
+        Write-Host "Installing $($package.source)..." -ForegroundColor Cyan
+        if ($package.PSObject.Properties.Name -contains "archive") {
+            Install-ArchivePackage -Package $package
+        } else {
             Invoke-Checked -Command $Pi -Arguments @("install", [string]$package.source, "--no-approve")
         }
     }

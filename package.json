@@ -9,7 +9,8 @@
   "type": "module",
   "pi": {
     "extensions": [
-      "./extensions/windows-notify/index.ts"
+      "./extensions/windows-notify/index.ts",
+      "./extensions/preset/index.ts"
     ],
     "skills": [
       "./skills/configure-playwright-mcp-windows"

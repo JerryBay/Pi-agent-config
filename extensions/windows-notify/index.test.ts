@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { describeStopReason, FocusTracker, normalizeToastText } from "./index.ts";
+import { describeStopReason, FocusTracker, normalizeToastText, WINDOWS_TOAST_XML } from "./index.ts";
 
 test("FocusTracker detects complete focus changes", () => {
 	const tracker = new FocusTracker();
@@ -23,6 +23,11 @@ test("FocusTracker detects sequences split across input chunks", () => {
 test("normalizeToastText strips control characters, folds whitespace, and truncates", () => {
 	assert.equal(normalizeToastText("  hello\n\u0000world  ", 30), "hello world");
 	assert.equal(normalizeToastText("123456789", 8), "12345...");
+});
+
+test("toast body does not request foreground app activation", () => {
+	assert.match(WINDOWS_TOAST_XML, /<toast activationType="background"/);
+	assert.doesNotMatch(WINDOWS_TOAST_XML, /activationType="foreground"/);
 });
 
 test("describeStopReason distinguishes terminal outcomes", () => {
