@@ -72,6 +72,35 @@ function hashDirectory(path) {
   return hash.digest("hex");
 }
 
+function portableFileContent(path) {
+  const content = readFileSync(path);
+  if (content.includes(0)) return content;
+  const text = content.toString("utf8");
+  return Buffer.from(text, "utf8").equals(content) ? Buffer.from(text.replaceAll("\r\n", "\n"), "utf8") : content;
+}
+
+function hashPortablePath(path) {
+  const hash = createHash("sha256");
+  if (!statSync(path).isDirectory()) return hash.update(portableFileContent(path)).digest("hex");
+  const visit = (directory, relative = "") => {
+    for (const name of readdirSync(directory).sort()) {
+      if (name === ".pi-agent-config-archive.json") continue;
+      const absolute = join(directory, name);
+      const childRelative = relative ? `${relative}/${name}` : name;
+      const stat = statSync(absolute);
+      if (stat.isDirectory()) visit(absolute, childRelative);
+      else {
+        hash.update(childRelative.replaceAll("\\", "/"));
+        hash.update("\0");
+        hash.update(portableFileContent(absolute));
+        hash.update("\0");
+      }
+    }
+  };
+  visit(path);
+  return hash.digest("hex");
+}
+
 function writeJsonAtomic(path, value) {
   mkdirSync(dirname(path), { recursive: true });
   const next = `${JSON.stringify(value, null, 2)}\n`;
@@ -154,6 +183,7 @@ function ensureState(state, profile) {
   state.mcpSettingsDefaults ??= {};
   state.migratedSources ??= [];
   state.legacyResources ??= {};
+  state.globalNpmTools ??= {};
   return state;
 }
 
@@ -183,6 +213,33 @@ function validateProfile(root, profile) {
   };
   scan(profile);
 
+  const globalToolIds = new Set();
+  for (const tool of profile.globalNpmTools ?? []) {
+    if (!tool.id || !tool.package || !tool.version || !tool.minimumNodeVersion) {
+      errors.push("Every global npm tool requires id, package, version, and minimumNodeVersion");
+      continue;
+    }
+    if (globalToolIds.has(tool.id)) errors.push(`Duplicate global npm tool id: ${tool.id}`);
+    if (!/^\d+\.\d+\.\d+$/.test(tool.version) || !/^\d+\.\d+\.\d+$/.test(tool.minimumNodeVersion)) {
+      errors.push(`Global npm tool versions must use x.y.z format: ${tool.id}`);
+    }
+    globalToolIds.add(tool.id);
+  }
+
+  const managedFileIds = new Set();
+  for (const file of profile.managedFiles ?? []) {
+    if (!file.id || !file.packageId || !file.sourceRelativePath || !file.targetRelativePath) {
+      errors.push("Every managed file requires id, packageId, sourceRelativePath, and targetRelativePath");
+      continue;
+    }
+    if (managedFileIds.has(file.id)) errors.push(`Duplicate managed file id: ${file.id}`);
+    if (!ids.has(file.packageId)) errors.push(`Unknown managed file package: ${file.packageId}`);
+    if (file.packageId === profile.id && !existsSync(resolve(root, file.sourceRelativePath))) {
+      errors.push(`Managed file source is missing: ${file.sourceRelativePath}`);
+    }
+    managedFileIds.add(file.id);
+  }
+
   for (const resource of profile.legacyResources ?? []) {
     if (!ids.has(resource.packageId)) errors.push(`Unknown legacy resource package: ${resource.packageId}`);
     if (!resource.id || !["extensions", "skills"].includes(resource.resourceType)) {
@@ -194,6 +251,9 @@ function validateProfile(root, profile) {
   }
 
   const packageJson = readJson(join(root, "package.json"), {});
+  if (packageJson.version !== profile.packageVersion) {
+    errors.push(`package.json version ${packageJson.version ?? "missing"} does not match profile packageVersion ${profile.packageVersion ?? "missing"}`);
+  }
   for (const resourceType of ["extensions", "skills", "prompts", "themes"]) {
     for (const relativePath of packageJson.pi?.[resourceType] ?? []) {
       if (!existsSync(resolve(root, relativePath))) errors.push(`Missing Pi ${resourceType} resource: ${relativePath}`);
@@ -241,11 +301,12 @@ function prepareProfile(root, agentDir, profile) {
   const backupDir = join(stateDir, "backups", runId);
   let backedUp = false;
 
-  for (const name of ["settings.json", "mcp.json", "AGENTS.md"]) {
+  for (const name of ["settings.json", "mcp.json", "AGENTS.md", ...(profile.managedFiles ?? []).map((file) => file.targetRelativePath)]) {
     const source = join(agentDir, name);
     if (!existsSync(source)) continue;
-    mkdirSync(backupDir, { recursive: true });
-    copyFileSync(source, join(backupDir, name));
+    const destination = join(backupDir, name);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyFileSync(source, destination);
     backedUp = true;
   }
 
@@ -288,8 +349,8 @@ function migrateLegacyResources(agentDir, profile, state, summary) {
       continue;
     }
 
-    const sourceHash = hashDirectory(sourcePath);
-    const targetHash = hashDirectory(targetPath);
+    const sourceHash = hashPortablePath(sourcePath);
+    const targetHash = hashPortablePath(targetPath);
     if (sourceHash !== targetHash) {
       summary.conflicts.push(`Legacy resource differs and was preserved: ${resource.targetRelativePath}`);
       disablePackagedResource(agentDir, item, resource, disabled);
@@ -427,59 +488,100 @@ function applyDefaults(target, defaults, records, label, summary, options = {}) 
   }
 }
 
-function applyAgentContext(agentDir, profile, state, options, summary) {
-  const context = profile.agentContext;
-  if (!context) return;
-  const item = findPackage(profile, context.packageId);
-  const sourcePath = join(checkoutPath(agentDir, item), context.relativePath);
+function applyManagedFile({ sourcePath, targetPath, stateKey, sourceLabel, label, missingSourceMessage, differsMessage }, state, options, summary) {
   if (!existsSync(sourcePath)) {
-    summary.conflicts.push(`Agent context source is missing: ${sourcePath}`);
+    summary.conflicts.push(missingSourceMessage ?? `Managed file source is missing: ${sourcePath}`);
     return;
   }
 
-  const targetPath = join(agentDir, "AGENTS.md");
   const sourceHash = hashFile(sourcePath);
-  const record = state.files.AGENTS;
+  const record = state.files[stateKey];
+  const updateRecord = (created, hash) => {
+    state.files[stateKey] = {
+      created,
+      hash,
+      source: sourceLabel,
+      targetRelativePath: label,
+    };
+  };
+
   if (!existsSync(targetPath)) {
     if (record && !options.repair) {
-      summary.conflicts.push("AGENTS.md was removed locally");
+      summary.conflicts.push(`${label} was removed locally`);
       return;
     }
+    mkdirSync(dirname(targetPath), { recursive: true });
     copyFileSync(sourcePath, targetPath);
-    state.files.AGENTS = { created: true, hash: sourceHash, source: `${item.id}/${context.relativePath}` };
-    summary[record ? "updated" : "added"].push("AGENTS.md");
+    updateRecord(true, sourceHash);
+    summary[record ? "updated" : "added"].push(label);
     return;
   }
 
   const currentHash = hashFile(targetPath);
   if (!record) {
     if (currentHash === sourceHash) {
-      state.files.AGENTS = { created: false, hash: currentHash, source: `${item.id}/${context.relativePath}` };
-      summary.already.push("AGENTS.md adopted");
+      updateRecord(false, currentHash);
+      summary.already.push(`${label} adopted`);
     } else {
-      summary.conflicts.push("AGENTS.md differs from the remote workflow source");
+      summary.conflicts.push(differsMessage ?? `${label} differs from the managed source`);
     }
     return;
   }
 
   if (currentHash === sourceHash) {
     record.hash = sourceHash;
-    summary.already.push("AGENTS.md");
+    record.source = sourceLabel;
+    record.targetRelativePath = label;
+    summary.already.push(label);
     return;
   }
   if (currentHash !== record.hash) {
     if (!options.forceManagedUpdate) {
-      summary.conflicts.push("AGENTS.md was modified locally");
+      summary.conflicts.push(`${label} was modified locally`);
       return;
     }
     copyFileSync(sourcePath, targetPath);
     record.hash = sourceHash;
-    summary.updated.push("AGENTS.md forced to the managed source");
+    record.source = sourceLabel;
+    record.targetRelativePath = label;
+    summary.updated.push(`${label} forced to the managed source`);
     return;
   }
   copyFileSync(sourcePath, targetPath);
   record.hash = sourceHash;
-  summary.updated.push("AGENTS.md");
+  record.source = sourceLabel;
+  record.targetRelativePath = label;
+  summary.updated.push(label);
+}
+
+function applyAgentContext(agentDir, profile, state, options, summary) {
+  const context = profile.agentContext;
+  if (!context) return;
+  const item = findPackage(profile, context.packageId);
+  const sourcePath = join(checkoutPath(agentDir, item), context.relativePath);
+  applyManagedFile({
+    sourcePath,
+    targetPath: join(agentDir, "AGENTS.md"),
+    stateKey: "AGENTS",
+    sourceLabel: `${item.id}/${context.relativePath}`,
+    label: "AGENTS.md",
+    missingSourceMessage: `Agent context source is missing: ${sourcePath}`,
+    differsMessage: "AGENTS.md differs from the remote workflow source",
+  }, state, options, summary);
+}
+
+function applyManagedFiles(agentDir, profile, state, options, summary) {
+  for (const file of profile.managedFiles ?? []) {
+    const item = findPackage(profile, file.packageId);
+    const sourcePath = join(checkoutPath(agentDir, item), file.sourceRelativePath);
+    applyManagedFile({
+      sourcePath,
+      targetPath: join(agentDir, file.targetRelativePath),
+      stateKey: `managed:${file.id}`,
+      sourceLabel: `${item.id}/${file.sourceRelativePath}`,
+      label: file.targetRelativePath,
+    }, state, options, summary);
+  }
 }
 
 function makePlaywrightServer(profile, options) {
@@ -711,6 +813,63 @@ function resolvePackageVersions(agentDir, profile, state) {
   }
 }
 
+function findGlobalNpmTool(profile, id) {
+  const tool = (profile.globalNpmTools ?? []).find((candidate) => candidate.id === id);
+  if (!tool) throw new Error(`Unknown global npm tool id: ${id}`);
+  return tool;
+}
+
+function decideGlobalNpmTool(tool, currentVersion, record, options = {}) {
+  if (!record) {
+    if (!currentVersion) return { action: "install", created: true, reason: "missing" };
+    if (currentVersion === tool.version) return { action: "adopt", created: false, reason: "matching pre-existing version" };
+    return { action: "conflict", reason: `pre-existing version ${currentVersion} differs from managed version ${tool.version}` };
+  }
+
+  if (!currentVersion) {
+    if (!options.repair) return { action: "conflict", reason: "was removed outside the profile" };
+    return { action: "install", created: true, reason: "repairing removed tool" };
+  }
+  if (currentVersion === tool.version) {
+    return { action: "already", created: Boolean(record.created), reason: "managed version is installed" };
+  }
+  if (currentVersion !== record.appliedVersion && !options.forceManagedUpdate) {
+    return { action: "conflict", reason: `was changed locally to ${currentVersion}` };
+  }
+  return {
+    action: "install",
+    created: Boolean(record.created),
+    reason: options.forceManagedUpdate ? "forcing managed version" : "updating managed version",
+  };
+}
+
+function planGlobalNpmTool(agentDir, profile, id, currentVersion, options = {}) {
+  const tool = findGlobalNpmTool(profile, id);
+  const statePath = join(agentDir, "profile-state", `${profile.id}.json`);
+  const state = ensureState(readJson(statePath, {}), profile);
+  return {
+    id,
+    package: tool.package,
+    desiredVersion: tool.version,
+    currentVersion: currentVersion || null,
+    ...decideGlobalNpmTool(tool, currentVersion, state.globalNpmTools[id], options),
+  };
+}
+
+function recordGlobalNpmTool(agentDir, profile, id, version, created) {
+  const tool = findGlobalNpmTool(profile, id);
+  if (version !== tool.version) throw new Error(`Installed ${tool.package} version ${version} does not match ${tool.version}`);
+  const statePath = join(agentDir, "profile-state", `${profile.id}.json`);
+  const state = ensureState(readJson(statePath, {}), profile);
+  state.globalNpmTools[id] = {
+    package: tool.package,
+    created: Boolean(created),
+    appliedVersion: version,
+  };
+  writeJsonAtomic(statePath, state);
+  return state.globalNpmTools[id];
+}
+
 function applyProfile(root, agentDir, profile, options) {
   mkdirSync(agentDir, { recursive: true });
   const statePath = join(agentDir, "profile-state", `${profile.id}.json`);
@@ -724,6 +883,7 @@ function applyProfile(root, agentDir, profile, options) {
   applyDefaults(settings, profile.settingsDefaults, state.settingsDefaults, "settings", summary, options);
   writeJsonAtomic(settingsPath, settings);
   applyAgentContext(agentDir, profile, state, options, summary);
+  applyManagedFiles(agentDir, profile, state, options, summary);
   applyMcp(agentDir, profile, state, options, summary);
   resolvePackageVersions(agentDir, profile, state);
 
@@ -742,6 +902,7 @@ function verifyProfile(root, agentDir, profile) {
   const result = {
     missingPackages,
     agentContextPresent: existsSync(join(agentDir, "AGENTS.md")),
+    managedFilesPresent: Object.fromEntries((profile.managedFiles ?? []).map((file) => [file.id, existsSync(join(agentDir, file.targetRelativePath))])),
     mcpConfigValid: existsSync(join(agentDir, "mcp.json")),
     statePresent: existsSync(join(agentDir, "profile-state", `${profile.id}.json`)),
   };
@@ -758,6 +919,8 @@ function planProfile(agentDir, profile, options) {
       action: findPackageIndex(settings.packages ?? [], item.source) >= 0 ? "update" : "install",
     })),
     agentContext: profile.agentContext,
+    managedFiles: profile.managedFiles ?? [],
+    globalNpmTools: profile.globalNpmTools ?? [],
     playwright: options.npx && options.browser ? { command: options.npx, browser: options.browser } : "skipped",
     repair: Boolean(options.repair),
     forceManagedUpdate: Boolean(options.forceManagedUpdate),
@@ -817,12 +980,20 @@ function uninstallProfile(agentDir, profile) {
   }
   writeJsonAtomic(settingsPath, settings);
 
-  const agentRecord = state.files.AGENTS;
-  const agentsPath = join(agentDir, "AGENTS.md");
-  if (agentRecord?.created && existsSync(agentsPath) && hashFile(agentsPath) === agentRecord.hash) {
-    rmSync(agentsPath);
-    summary.removed.push("AGENTS.md");
-  } else if (agentRecord) summary.preserved.push("AGENTS.md");
+  for (const [id, record] of Object.entries(state.files)) {
+    const targetRelativePath = record.targetRelativePath ?? (id === "AGENTS" ? "AGENTS.md" : undefined);
+    if (!targetRelativePath) {
+      summary.preserved.push(`Managed file state: ${id}`);
+      continue;
+    }
+    const targetPath = join(agentDir, targetRelativePath);
+    if (record.created && existsSync(targetPath) && hashFile(targetPath) === record.hash) {
+      rmSync(targetPath);
+      summary.removed.push(targetRelativePath);
+    } else {
+      summary.preserved.push(targetRelativePath);
+    }
+  }
 
   const mcpPath = join(agentDir, "mcp.json");
   if (existsSync(mcpPath)) {
@@ -867,6 +1038,7 @@ function printSummary(summary) {
 
 export {
   applyProfile,
+  decideGlobalNpmTool,
   planProfile,
   prepareProfile,
   readJson,
@@ -899,6 +1071,18 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         if (!args.path) throw new Error("hash-directory requires --path");
         if (!existsSync(resolve(args.path))) throw new Error(`Directory does not exist: ${args.path}`);
         result = { hash: hashDirectory(resolve(args.path)) };
+        break;
+      }
+      case "plan-global-npm-tool": {
+        if (!args.toolId) throw new Error("plan-global-npm-tool requires --tool-id");
+        result = planGlobalNpmTool(agentDir, profile, args.toolId, typeof args.currentVersion === "string" ? args.currentVersion : "", options);
+        break;
+      }
+      case "record-global-npm-tool": {
+        if (!args.toolId || !args.version || !["true", "false"].includes(args.created)) {
+          throw new Error("record-global-npm-tool requires --tool-id, --version, and --created true|false");
+        }
+        result = recordGlobalNpmTool(agentDir, profile, args.toolId, args.version, args.created === "true");
         break;
       }
       case "validate": result = validateProfile(root, profile); break;

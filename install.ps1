@@ -3,6 +3,7 @@ param(
     [string]$AgentDir,
     [switch]$ValidateOnly,
     [switch]$SkipPrivateAccessCheck,
+    [switch]$SkipGlobalNpmTools,
     [switch]$Repair,
     [switch]$ForceManagedUpdate
 )
@@ -17,6 +18,7 @@ if ($env:OS -ne "Windows_NT") {
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProfilePath = Join-Path $Root "profile.json"
 $ManagerPath = Join-Path $Root "scripts\profile-manager.mjs"
+$Profile = Get-Content -LiteralPath $ProfilePath -Raw | ConvertFrom-Json
 
 if (-not $AgentDir) {
     if ($env:PI_CODING_AGENT_DIR) {
@@ -62,6 +64,14 @@ try { $NodeVersion = [version]$NodeVersionText } catch { throw "Node.js returned
 if ($NodeVersion.Major -lt 20) {
     throw "Node.js 20 or newer is required; detected $NodeVersionText."
 }
+if (-not $SkipGlobalNpmTools) {
+    foreach ($tool in @($Profile.globalNpmTools)) {
+        $minimum = [version]([string]$tool.minimumNodeVersion)
+        if ($NodeVersion -lt $minimum) {
+            throw "$($tool.package) requires Node.js $minimum or newer; detected $NodeVersionText. Use -SkipGlobalNpmTools to install only the Pi profile."
+        }
+    }
+}
 Invoke-Checked -Command $Node -Arguments @($ManagerPath, "validate", "--root", $Root)
 
 if ($ValidateOnly) {
@@ -72,6 +82,7 @@ if ($ValidateOnly) {
 $Pi = Resolve-Executable -Names @("pi.cmd", "pi.exe", "pi") -Description "Pi"
 $Git = Resolve-Executable -Names @("git.exe", "git") -Description "Git"
 $Npx = Resolve-Executable -Names @("npx.cmd", "npx.exe", "npx") -Description "npx"
+$Npm = Resolve-Executable -Names @("npm.cmd", "npm.exe", "npm") -Description "npm"
 
 Invoke-Checked -Command $Npx -Arguments @("--version")
 
@@ -92,12 +103,57 @@ $ChromeCandidates = @(
 
 $Browser = if ($EdgeCandidates.Count -gt 0) { "msedge" } elseif ($ChromeCandidates.Count -gt 0) { "chrome" } else { "" }
 $OutputDir = Join-Path $env:LOCALAPPDATA "Temp\pi-playwright-mcp"
-$Profile = Get-Content -LiteralPath $ProfilePath -Raw | ConvertFrom-Json
 
 $ManagerOptions = @("--root", $Root, "--agent-dir", $AgentDir, "--npx", $Npx, "--output-dir", $OutputDir)
 if ($Browser) { $ManagerOptions += @("--browser", $Browser) }
 if ($Repair -or $ForceManagedUpdate) { $ManagerOptions += "--repair" }
 if ($ForceManagedUpdate) { $ManagerOptions += "--force-managed-update" }
+
+function Get-GlobalNpmPackageVersion {
+    param([string]$Package)
+    $output = (& $Npm list --global --depth=0 --json $Package 2>$null | Out-String).Trim()
+    if (-not $output) { return "" }
+    try { $data = $output | ConvertFrom-Json } catch { return "" }
+    if (-not $data.dependencies) { return "" }
+    $entry = @($data.dependencies.PSObject.Properties | Where-Object { $_.Name -eq $Package } | Select-Object -First 1)
+    if ($entry.Count -eq 0 -or -not $entry[0].Value.version) { return "" }
+    return [string]$entry[0].Value.version
+}
+
+function Sync-GlobalNpmTool {
+    param($Tool)
+    $currentVersion = Get-GlobalNpmPackageVersion -Package ([string]$Tool.package)
+    $planArguments = @($ManagerPath, "plan-global-npm-tool", "--root", $Root, "--agent-dir", $AgentDir, "--tool-id", [string]$Tool.id)
+    if ($currentVersion) { $planArguments += @("--current-version", $currentVersion) }
+    if ($Repair -or $ForceManagedUpdate) { $planArguments += "--repair" }
+    if ($ForceManagedUpdate) { $planArguments += "--force-managed-update" }
+    $plan = & $Node @planArguments | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw "Could not plan global npm tool $($Tool.id)." }
+
+    if ($plan.action -eq "conflict") {
+        Write-Warning "Global npm tool $($Tool.package) $($plan.reason); preserved."
+        return
+    }
+
+    if ($plan.action -eq "install") {
+        $source = "$($Tool.package)@$($Tool.version)"
+        if (-not $PSCmdlet.ShouldProcess($source, "Install or update global npm tool")) { return }
+        Write-Host "Installing global tool $source..." -ForegroundColor Cyan
+        Invoke-Checked -Command $Npm -Arguments @("install", "--global", $source)
+        $currentVersion = Get-GlobalNpmPackageVersion -Package ([string]$Tool.package)
+        if ($currentVersion -ne [string]$Tool.version) {
+            throw "Global npm tool $($Tool.package) installed version $currentVersion instead of $($Tool.version)."
+        }
+    } else {
+        Write-Host "$($Tool.package): $($plan.action) $currentVersion"
+    }
+
+    $created = ([bool]$plan.created).ToString().ToLowerInvariant()
+    Invoke-Checked -Command $Node -Arguments @(
+        $ManagerPath, "record-global-npm-tool", "--root", $Root, "--agent-dir", $AgentDir,
+        "--tool-id", [string]$Tool.id, "--version", [string]$Tool.version, "--created", $created
+    )
+}
 
 if ($WhatIfPreference) {
     Invoke-Checked -Command $Node -Arguments (@($ManagerPath, "plan") + $ManagerOptions)
@@ -128,6 +184,12 @@ $PreviousAgentDir = $env:PI_CODING_AGENT_DIR
 $env:PI_CODING_AGENT_DIR = $AgentDir
 try {
     Invoke-Checked -Command $Node -Arguments @($ManagerPath, "prepare", "--root", $Root, "--agent-dir", $AgentDir)
+
+    if (-not $SkipGlobalNpmTools) {
+        foreach ($tool in @($Profile.globalNpmTools)) {
+            Sync-GlobalNpmTool -Tool $tool
+        }
+    }
 
     foreach ($package in @($Profile.packages)) {
         if (-not $PSCmdlet.ShouldProcess($package.source, "Install or update Pi package")) { continue }

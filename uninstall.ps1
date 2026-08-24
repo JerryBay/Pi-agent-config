@@ -22,11 +22,24 @@ if (-not (Test-Path -LiteralPath $StatePath)) {
 
 $Node = (Get-Command node.exe, node -ErrorAction SilentlyContinue | Select-Object -First 1).Source
 $Pi = (Get-Command pi.cmd, pi.exe, pi -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+$Npm = (Get-Command npm.cmd, npm.exe, npm -ErrorAction SilentlyContinue | Select-Object -First 1).Source
 if (-not $Node) { throw "Node.js was not found on PATH." }
 if (-not $Pi) { throw "Pi was not found on PATH." }
+if (-not $Npm) { throw "npm was not found on PATH." }
 
 $State = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
 $Profile = Get-Content -LiteralPath $ProfilePath -Raw | ConvertFrom-Json
+
+function Get-GlobalNpmPackageVersion {
+    param([string]$Package)
+    $output = (& $Npm list --global --depth=0 --json $Package 2>$null | Out-String).Trim()
+    if (-not $output) { return "" }
+    try { $data = $output | ConvertFrom-Json } catch { return "" }
+    if (-not $data.dependencies) { return "" }
+    $entry = @($data.dependencies.PSObject.Properties | Where-Object { $_.Name -eq $Package } | Select-Object -First 1)
+    if ($entry.Count -eq 0 -or -not $entry[0].Value.version) { return "" }
+    return [string]$entry[0].Value.version
+}
 
 function Get-ManagedDirectoryHash {
     param([string]$Path)
@@ -64,6 +77,23 @@ try {
         & $Pi remove ([string]$record.source) --no-approve
         if ($LASTEXITCODE -ne 0) {
             throw "Could not remove package $($record.source)."
+        }
+    }
+
+    if ($State.PSObject.Properties.Name -contains "globalNpmTools") {
+        foreach ($property in @($State.globalNpmTools.PSObject.Properties)) {
+            $record = $property.Value
+            if ($record.created -ne $true) { continue }
+            $currentVersion = Get-GlobalNpmPackageVersion -Package ([string]$record.package)
+            if (-not $currentVersion) { continue }
+            if ($currentVersion -ne [string]$record.appliedVersion) {
+                Write-Warning "Modified global npm tool was preserved: $($record.package)@$currentVersion"
+                continue
+            }
+            if (-not $PSCmdlet.ShouldProcess([string]$record.package, "Remove profile-created global npm tool")) { continue }
+            Write-Host "Removing global tool $($record.package)..." -ForegroundColor Cyan
+            & $Npm uninstall --global ([string]$record.package)
+            if ($LASTEXITCODE -ne 0) { throw "Could not remove global npm tool $($record.package)." }
         }
     }
 

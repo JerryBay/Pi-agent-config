@@ -1,0 +1,4 @@
+{
+  "app.message.followUp": ["enter"],
+  "tui.input.submit": ["ctrl+enter"]
+}

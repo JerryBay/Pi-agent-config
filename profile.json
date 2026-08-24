@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "pi-agent-config",
-  "packageVersion": "0.1.0",
+  "packageVersion": "0.2.0",
   "packages": [
     {
       "id": "pi-agent-config",
@@ -80,6 +80,14 @@
       }
     }
   ],
+  "globalNpmTools": [
+    {
+      "id": "pi-web",
+      "package": "@agegr/pi-web",
+      "version": "0.8.9",
+      "minimumNodeVersion": "22.19.0"
+    }
+  ],
   "legacyResources": [
     {
       "id": "windows-notify-local",
@@ -98,6 +106,14 @@
       "packageRelativePath": "./extensions/preset/index.ts"
     },
     {
+      "id": "restore-terminal-title-local",
+      "packageId": "pi-agent-config",
+      "resourceType": "extensions",
+      "sourceRelativePath": "extensions/restore-terminal-title/index.ts",
+      "targetRelativePath": "extensions/restore-terminal-title.ts",
+      "packageRelativePath": "./extensions/restore-terminal-title/index.ts"
+    },
+    {
       "id": "playwright-skill-memory",
       "packageId": "pi-agent-config",
       "resourceType": "skills",
@@ -109,6 +125,14 @@
     "packageId": "codex-workflow-profile",
     "relativePath": "AGENTS.md"
   },
+  "managedFiles": [
+    {
+      "id": "keybindings",
+      "packageId": "pi-agent-config",
+      "sourceRelativePath": "keybindings.json",
+      "targetRelativePath": "keybindings.json"
+    }
+  ],
   "settingsDefaults": {
     "theme": "dark/dark"
   },
