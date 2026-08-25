@@ -13,9 +13,7 @@ Provide one repeatable Windows installer for a portable Pi Agent workflow. The i
 
 ## Update Policy
 
-Unversioned Git and npm Pi package sources obtain their current upstream version when the installer runs. The Playwright MCP version remains pinned because its command-line arguments are an integration contract. `@tmustier/pi-raw-paste` is pinned at `0.1.3` because the `/paste` command and `Alt+P` shortcut are a user-facing interaction contract. The global `@agegr/pi-web` companion is pinned at `0.8.9` because it embeds a matching Pi runtime and requires a specific Node.js baseline. The installer records resolved sources, versions, and hashes so later runs can update installer-owned, unmodified content and preserve user modifications.
-
-`tmustier/pi-extensions` is acquired as a commit-addressed selective snapshot because full Git clones stall in the supported Windows environment. The installer reads the GitHub commit tree and downloads only the enabled extensions, skills, and their support files; large demos, screenshots, and the separately installed `raw-paste` source are excluded. Its Pi package source remains declared in settings, while the installer records the resolved commit and a content hash so modified snapshots are preserved.
+Unversioned Git and npm Pi package sources obtain their current upstream version when the installer runs. The Playwright MCP version remains pinned because its command-line arguments are an integration contract. The global `@agegr/pi-web` companion is pinned at `0.8.9` because it embeds a matching Pi runtime and requires a specific Node.js baseline. The installer records resolved sources, versions, and hashes so later runs can update installer-owned, unmodified content and preserve user modifications.
 
 ## Merge Rules
 

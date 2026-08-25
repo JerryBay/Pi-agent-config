@@ -46,16 +46,18 @@ function clean(fixture) {
 test("profile manifest contains valid portable resources", () => {
   const result = validateProfile(root, profile);
   assert.equal(result.profileId, "pi-agent-config");
-  assert.equal(result.packages, 9);
-
-  const rawPaste = profile.packages.find((item) => item.id === "pi-raw-paste");
-  assert.equal(rawPaste.source, "npm:@tmustier/pi-raw-paste@0.1.3");
-  const extensionSnapshot = profile.packages.find((item) => item.id === "tmustier-pi-extensions");
-  assert.deepEqual(extensionSnapshot.filter.extensions, ["files-widget/index.ts", "usage-extension/index.ts"]);
-  assert.equal(extensionSnapshot.archive.include.includes("raw-paste/"), false);
+  assert.equal(result.packages, 6);
+  assert.deepEqual(profile.packages.map((item) => item.id), [
+    "pi-agent-config",
+    "codex-workflow-profile",
+    "pi-mcp-adapter",
+    "pi-web-access",
+    "pi-subagents",
+    "pi-hermes-memory",
+  ]);
 
   const packageManifest = readJson(join(root, "package.json"), {});
-  assert.equal(packageManifest.version, "0.2.0");
+  assert.equal(packageManifest.version, "0.3.0");
   assert.equal(profile.packageVersion, packageManifest.version);
   assert.deepEqual(packageManifest.pi.extensions, [
     "./extensions/windows-notify/index.ts",
@@ -207,9 +209,6 @@ test("force managed update replaces modified owned content only", () => {
 
     const settings = readJson(join(fixture.agentDir, "settings.json"), {});
     settings.theme = "local-theme";
-    const extensionSource = profile.packages.at(-1).source;
-    const extensionPackage = settings.packages.find((entry) => (typeof entry === "string" ? entry : entry.source) === extensionSource);
-    extensionPackage.extensions = ["local-extension.ts"];
     writeFileSync(join(fixture.agentDir, "settings.json"), `${JSON.stringify(settings, null, 2)}\n`);
     writeFileSync(join(fixture.agentDir, "AGENTS.md"), "# Local override\n");
     writeFileSync(join(fixture.agentDir, "keybindings.json"), "{\"local\":true}\n");
@@ -220,7 +219,6 @@ test("force managed update replaces modified owned content only", () => {
 
     prepareProfile(root, fixture.agentDir, profile);
     const preserved = applyProfile(root, fixture.agentDir, profile, options);
-    assert.equal(preserved.conflicts.some((entry) => entry.includes("package filter was modified locally")), true);
     assert.equal(preserved.conflicts.includes("AGENTS.md was modified locally"), true);
     assert.equal(preserved.conflicts.includes("keybindings.json was modified locally"), true);
     assert.equal(preserved.conflicts.includes("settings.theme was modified locally"), true);
@@ -231,7 +229,6 @@ test("force managed update replaces modified owned content only", () => {
     assert.equal(forced.conflicts.length, 0);
     const forcedSettings = readJson(join(fixture.agentDir, "settings.json"), {});
     assert.equal(forcedSettings.theme, profile.settingsDefaults.theme);
-    assert.deepEqual(forcedSettings.packages.find((entry) => entry.source === extensionSource).extensions, profile.packages.at(-1).filter.extensions);
     assert.match(readFileSync(join(fixture.agentDir, "AGENTS.md"), "utf8"), /Shared agent rules/);
     assert.deepEqual(readJson(join(fixture.agentDir, "keybindings.json"), {}), { managed: true });
     assert.equal(readJson(join(fixture.agentDir, "mcp.json"), {}).mcpServers.playwright.command, "C:/Tools/node/npx.cmd");
@@ -269,52 +266,6 @@ test("pre-existing agent context and MCP server are preserved", () => {
     assert.equal(readFileSync(join(fixture.agentDir, "AGENTS.md"), "utf8"), "# Existing local rules\n");
     assert.deepEqual(readJson(join(fixture.agentDir, "keybindings.json"), {}), { existing: true });
     assert.equal(readJson(join(fixture.agentDir, "mcp.json"), {}).mcpServers.playwright.command, "custom-playwright.cmd");
-  } finally {
-    clean(fixture);
-  }
-});
-
-test("legacy Git package aliases migrate to SSH and restore on uninstall", () => {
-  const fixture = makeFixture();
-  try {
-    const legacySource = profile.packages.at(-1).legacySources[0];
-    const settings = readJson(join(fixture.agentDir, "settings.json"), {});
-    settings.packages[settings.packages.length - 1] = { source: legacySource, ...profile.packages.at(-1).filter };
-    writeFileSync(join(fixture.agentDir, "settings.json"), `${JSON.stringify(settings, null, 2)}\n`);
-
-    const prepared = prepareProfile(root, fixture.agentDir, profile);
-    assert.equal(prepared.migratedAliases, 1);
-    assert.equal(readJson(join(fixture.agentDir, "settings.json"), {}).packages.at(-1).source, profile.packages.at(-1).source);
-    applyProfile(root, fixture.agentDir, profile, options);
-    const state = readJson(join(fixture.agentDir, "profile-state", "pi-agent-config.json"), {});
-    assert.equal(state.packages[profile.packages.at(-1).id].created, false);
-
-    uninstallProfile(fixture.agentDir, profile);
-    assert.equal(readJson(join(fixture.agentDir, "settings.json"), {}).packages.at(-1).source, legacySource);
-  } finally {
-    clean(fixture);
-  }
-});
-
-test("unpinned raw paste migrates to the pinned package and restores on uninstall", () => {
-  const fixture = makeFixture();
-  try {
-    const rawPaste = profile.packages.find((item) => item.id === "pi-raw-paste");
-    const legacySource = rawPaste.legacySources[0];
-    const settings = readJson(join(fixture.agentDir, "settings.json"), {});
-    const index = settings.packages.findIndex((entry) => entry === rawPaste.source);
-    settings.packages[index] = legacySource;
-    writeFileSync(join(fixture.agentDir, "settings.json"), `${JSON.stringify(settings, null, 2)}\n`);
-
-    const prepared = prepareProfile(root, fixture.agentDir, profile);
-    assert.equal(prepared.migratedAliases, 1);
-    assert.equal(readJson(join(fixture.agentDir, "settings.json"), {}).packages[index], rawPaste.source);
-    applyProfile(root, fixture.agentDir, profile, options);
-    const state = readJson(join(fixture.agentDir, "profile-state", "pi-agent-config.json"), {});
-    assert.equal(state.packages[rawPaste.id].created, false);
-
-    uninstallProfile(fixture.agentDir, profile);
-    assert.equal(readJson(join(fixture.agentDir, "settings.json"), {}).packages[index], legacySource);
   } finally {
     clean(fixture);
   }
