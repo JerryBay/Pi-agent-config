@@ -39,6 +39,12 @@ The package owns the portable message-routing defaults in `keybindings.json`: `E
 
 `@agegr/pi-web` is a standalone global npm application rather than a Pi package. The installer manages its pinned version separately from `settings.json`: a missing installation is created, a matching installation is adopted, and an unowned differing version is preserved. State records whether the profile created or adopted it, allowing uninstall to remove only unchanged profile-created installations. `-SkipGlobalNpmTools` leaves the global npm environment untouched and retains Node.js 20 compatibility for the core profile; otherwise Node.js 22.19 or newer is required.
 
+## Optional Blender Integration
+
+`install-blender.ps1`, optionally invoked by `install.ps1 -WithBlender`, installs the checksum-pinned official Blender Lab v1.0.0 assets into a dedicated Python environment and enables the Blender extension. Blender and Python are prerequisites, not installed by the profile. Executable paths are supplied or resolved locally. Existing MCP entries, extension directories and tool directories are not overwritten. The installer supports standard Blender user configuration only and requires Blender to be closed.
+
+Only the new MCP entry enters profile ownership; normal uninstall preserves modified entries and retains Blender-side files and the Python environment. Loopback networking and tool approvals are configured without changing global Blender online-access or script-execution preferences. No Blender skill is bundled.
+
 ## Exclusions
 
 The profile does not manage `models.json`, provider/model defaults, user preset overrides, API keys, OAuth credentials, sessions, `trust.json`, memory databases, logs, caches, shell paths, browser paths, or machine-specific Node/npm paths.

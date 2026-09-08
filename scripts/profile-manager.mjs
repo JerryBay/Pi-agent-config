@@ -813,6 +813,32 @@ function resolvePackageVersions(agentDir, profile, state) {
   }
 }
 
+function configureBlender(agentDir, profile, python, blender) {
+  const configPath = join(agentDir, "mcp.json");
+  const config = readJson(configPath, {});
+  config.mcpServers ??= {};
+  if (config.mcpServers.blender) return { status: "preserved" };
+  const server = {
+    command: python.replaceAll("\\", "/"),
+    args: ["-m", "blmcp", "--transport", "stdio"],
+    env: { BLENDER_MCP_HOST: "127.0.0.1", BLENDER_MCP_PORT: "9876", BLENDER_PATH: blender.replaceAll("\\", "/"), PYTHONUTF8: "1" },
+    lifecycle: "lazy", directTools: false, requestTimeoutMs: 180000,
+    approveTools: ["execute_blender_code*"],
+  };
+  const statePath = join(agentDir, "profile-state", `${profile.id}.json`);
+  const state = ensureState(readJson(statePath, {}), profile);
+  if (existsSync(configPath)) {
+    const backup = join(agentDir, "profile-state", "backups", `blender-${randomUUID()}`, "mcp.json");
+    mkdirSync(dirname(backup), { recursive: true });
+    copyFileSync(configPath, backup);
+  }
+  config.mcpServers.blender = server;
+  state.mcpServers.blender = { created: true, hash: hashValue(server) };
+  writeJsonAtomic(configPath, config);
+  writeJsonAtomic(statePath, state);
+  return { status: "created" };
+}
+
 function findGlobalNpmTool(profile, id) {
   const tool = (profile.globalNpmTools ?? []).find((candidate) => candidate.id === id);
   if (!tool) throw new Error(`Unknown global npm tool id: ${id}`);
@@ -1037,6 +1063,7 @@ function printSummary(summary) {
 }
 
 export {
+  configureBlender,
   applyProfile,
   decideGlobalNpmTool,
   planProfile,
@@ -1083,6 +1110,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
           throw new Error("record-global-npm-tool requires --tool-id, --version, and --created true|false");
         }
         result = recordGlobalNpmTool(agentDir, profile, args.toolId, args.version, args.created === "true");
+        break;
+      }
+      case "configure-blender": {
+        if (!args.python || !args.blender) throw new Error("configure-blender requires --python and --blender");
+        result = configureBlender(agentDir, profile, args.python, args.blender);
         break;
       }
       case "validate": result = validateProfile(root, profile); break;

@@ -4,6 +4,9 @@ param(
     [switch]$ValidateOnly,
     [switch]$SkipPrivateAccessCheck,
     [switch]$SkipGlobalNpmTools,
+    [switch]$WithBlender,
+    [string]$BlenderPath,
+    [string]$PythonPath = "python.exe",
     [switch]$Repair,
     [switch]$ForceManagedUpdate
 )
@@ -156,6 +159,7 @@ function Sync-GlobalNpmTool {
 }
 
 if ($WhatIfPreference) {
+    if ($WithBlender) { & (Join-Path $Root "install-blender.ps1") -AgentDir $AgentDir -BlenderPath $BlenderPath -PythonPath $PythonPath -WhatIf }
     Invoke-Checked -Command $Node -Arguments (@($ManagerPath, "plan") + $ManagerOptions)
     exit 0
 }
@@ -202,6 +206,9 @@ try {
     }
 
     Invoke-Checked -Command $Node -Arguments (@($ManagerPath, "apply") + $ManagerOptions)
+    if ($WithBlender) {
+        & (Join-Path $Root "install-blender.ps1") -AgentDir $AgentDir -BlenderPath $BlenderPath -PythonPath $PythonPath
+    }
     Invoke-Checked -Command $Node -Arguments @($ManagerPath, "verify", "--root", $Root, "--agent-dir", $AgentDir)
 } finally {
     $env:PI_CODING_AGENT_DIR = $PreviousAgentDir

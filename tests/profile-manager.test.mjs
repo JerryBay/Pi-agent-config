@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  configureBlender,
   applyProfile,
   decideGlobalNpmTool,
   prepareProfile,
@@ -78,6 +79,30 @@ test("profile manifest contains valid portable resources", () => {
     version: "0.8.9",
     minimumNodeVersion: "22.19.0",
   }]);
+});
+
+test("Blender configuration preserves existing servers and uninstalls only owned entries", () => {
+  const fixture = makeFixture();
+  try {
+    const path = join(fixture.agentDir, "mcp.json");
+    writeFileSync(path, JSON.stringify({ mcpServers: { playwright: { command: "keep" } }, settings: { outputGuard: true } }));
+    assert.equal(configureBlender(fixture.agentDir, profile, "C:\\Tools\\python.exe", "C:\\Blender\\blender.exe").status, "created");
+    const config = readJson(path, {});
+    assert.equal(config.mcpServers.playwright.command, "keep");
+    assert.equal(config.mcpServers.blender.env.BLENDER_MCP_HOST, "127.0.0.1");
+    assert.deepEqual(config.mcpServers.blender.approveTools, ["execute_blender_code*"]);
+    assert.equal(config.mcpServers.blender.command, "C:/Tools/python.exe");
+    const before = readFileSync(path, "utf8");
+    assert.equal(configureBlender(fixture.agentDir, profile, "different", "different").status, "preserved");
+    assert.equal(readFileSync(path, "utf8"), before);
+    uninstallProfile(fixture.agentDir, profile);
+    assert.equal(readJson(path, {}).mcpServers.blender, undefined);
+    assert.equal(readJson(path, {}).mcpServers.playwright.command, "keep");
+    writeFileSync(path, JSON.stringify(config));
+    assert.equal(configureBlender(fixture.agentDir, profile, "different", "different").status, "preserved");
+    uninstallProfile(fixture.agentDir, profile);
+    assert.deepEqual(readJson(path, {}).mcpServers.blender, config.mcpServers.blender);
+  } finally { clean(fixture); }
 });
 
 test("global npm tool planning preserves ownership boundaries", () => {

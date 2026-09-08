@@ -133,6 +133,24 @@ The installer detects a working `npx.cmd` and an installed Edge or Chrome channe
 
 An existing `playwright` MCP server is preserved unless it was created by this installer and has not been modified.
 
+## Blender MCP (Optional)
+
+The default installation does not install Blender integration. To opt in, install Blender 5.1+ and Python 3.10+ first, close Blender, then run:
+
+```powershell
+.\install.ps1 -WithBlender -BlenderPath "C:\Program Files\Blender Foundation\Blender 5.1\blender.exe"
+```
+
+To install only this integration, use `install-blender.ps1` with the same `-BlenderPath`. Both entrypoints accept `-AgentDir` and `-PythonPath`; the standalone installer supports `-WhatIf`. If Blender is on PATH, its path can be omitted. No Blender installation skill is bundled.
+
+The installer downloads the official Blender Lab v1.0.0 release assets, verifies pinned SHA-256 hashes, creates an isolated Python environment with MCP SDK 1.27.0, backs up the standard Blender user preferences, installs and verifies the Blender extension, and adds a lazy, loopback-only MCP server. It does not install the unrelated PyPI package by name. Other Python dependencies are resolved by pip, not fully locked.
+
+An existing `blender` MCP entry is preserved and skips the entire installation, including repair or upgrades. An existing Blender MCP extension directory also blocks installation to avoid overwriting a separately installed extension. A pre-existing tool directory also blocks installation rather than being overwritten; inspect partial installations before retrying. Use the standard Blender user configuration location, not a custom `BLENDER_USER_RESOURCES`/portable configuration, for this installer.
+
+Start Blender with `--online-mode` when using MCP, then `/reload` Pi and connect `blender`. Installation does not enable global online access or automatic .blend script execution. Python execution tools require approval, but the bridge is not a sandbox. A live connection/scene-read check is still required after installation.
+
+Profile uninstall removes only the unchanged profile-created MCP entry. The Blender extension, preference backup and Python environment are retained for manual removal; pre-existing MCP entries are never adopted or removed.
+
 ## Not Managed
 
 The profile deliberately excludes:
